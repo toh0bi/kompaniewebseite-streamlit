@@ -25,24 +25,31 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Authentication  (st.login requires Authlib and Streamlit >= 1.35)
+# Authentication
 # ---------------------------------------------------------------------------
-_user_email = getattr(st.user, "email", None)
+# Simple password auth matching the pattern used in the other app,
+# avoiding the OAuth CSRF/Authlib issues entirely.
 
-if not _user_email:
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
     st.title("5KP Website CMS - Anmeldung erforderlich")
-    st.info("Bitte melde dich mit deinem Google-Konto an, um fortzufahren.")
-    if st.button("Mit Google anmelden", type="primary"):
-        st.login()
-    st.stop()
-
-allowed_emails: list[str] = st.secrets.get("allowed_emails", [])
-if _user_email not in allowed_emails:
-    st.error(
-        f"Zugriff verweigert. Das Konto **{_user_email}** ist nicht autorisiert."
-    )
-    if st.button("Abmelden"):
-        st.logout()
+    st.info("Bitte melde dich an, um fortzufahren.")
+    
+    with st.form("login_form"):
+        password = st.text_input("CMS Passwort", type="password")
+        submit = st.form_submit_button("Einloggen", type="primary")
+        
+        if submit:
+            # Get password from secrets or use a default one for deployment ease
+            correct_password = st.secrets.get("cms_password", "moorhasen_cms_2026")
+            
+            if password == correct_password:
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("Falsches Passwort.")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -172,15 +179,17 @@ if "target_file" not in st.session_state:
     st.session_state.target_file = "website/internal/index.html"
 if "last_prompt" not in st.session_state:
     st.session_state.last_prompt = ""
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 st.title("5KP Website CMS")
-st.caption(f"Angemeldet als {st.user.name} ({st.user.email})")
 
 if st.button("Abmelden", key="logout"):
-    st.logout()
+    st.session_state.logged_in = False
+    st.rerun()
 
 st.divider()
 
