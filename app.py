@@ -25,9 +25,11 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Authentication  (st.login requires Streamlit >= 1.35 + Google OAuth config)
+# Authentication  (st.login requires Authlib and Streamlit >= 1.35)
 # ---------------------------------------------------------------------------
-if not st.user.is_logged_in:
+_user_email = getattr(st.user, "email", None)
+
+if not _user_email:
     st.title("5KP Website CMS - Anmeldung erforderlich")
     st.info("Bitte melde dich mit deinem Google-Konto an, um fortzufahren.")
     if st.button("Mit Google anmelden", type="primary"):
@@ -35,9 +37,9 @@ if not st.user.is_logged_in:
     st.stop()
 
 allowed_emails: list[str] = st.secrets.get("allowed_emails", [])
-if st.user.email not in allowed_emails:
+if _user_email not in allowed_emails:
     st.error(
-        f"Zugriff verweigert. Das Konto **{st.user.email}** ist nicht autorisiert."
+        f"Zugriff verweigert. Das Konto **{_user_email}** ist nicht autorisiert."
     )
     if st.button("Abmelden"):
         st.logout()
