@@ -11,6 +11,7 @@ import json
 import time
 
 import boto3
+from botocore.config import Config
 import requests
 import streamlit as st
 from pypdf import PdfReader
@@ -133,50 +134,165 @@ def _bedrock_client():
     (env vars, ~/.aws/credentials, IAM role) for local development.
     """
     region = st.secrets.get("AWS_DEFAULT_REGION", "eu-central-1")
+    # Increase read_timeout exponentially since large HTML generations with Sonnet take time
+    my_config = Config(
+        read_timeout=900,
+        connect_timeout=900,
+        retries={"max_attempts": 3}
+    )
+    
     if "AWS_ACCESS_KEY_ID" in st.secrets:
         return boto3.client(
             "bedrock-runtime",
             region_name=region,
             aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
             aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+            config=my_config
         )
-    return boto3.client("bedrock-runtime", region_name=region)
+    return boto3.client("bedrock-runtime", region_name=region, config=my_config)
 
 
-def call_bedrock(current_html: str, user_prompt: str, extra_context: str = "") -> str:
-    """Send the HTML + prompt to Claude via Bedrock and return the updated HTML."""
+def load_system_prompt() -> str:
+    try:
+        with open("CLAUDE.md", "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return "Du bist der Webmaster der Seite. Passe das HTML an."
+
+
+def call_agentic_bedrock(user_prompt: str, extra_context: str = "") -> str:
+    """Agentic loop using the Bedrock Converse API with Function Calling."""
     bedrock = _bedrock_client()
+    model_id = st.secrets.get("BEDROCK_MODEL_ID", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
-    user_message = (
-        f"Aktueller HTML-Code:\n{current_html}\n\n"
-        f"Gewünschte Änderung: {user_prompt}"
-        f"{extra_context}"
-    )
-
-    response = bedrock.invoke_model(
-        modelId=st.secrets.get("BEDROCK_MODEL_ID", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"),
-        body=json.dumps(
+    system_prompt = [{"text": load_system_prompt()}]
+    
+    # Bedrock tool definitions
+    tool_config = {
+        "tools": [
             {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 8192,
-                "system": _SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": user_message}],
+                "toolSpec": {
+                    "name": "read_github_file",
+                    "description": "Liest den aktuellen Inhalt einer Datei aus dem GitHub Repository (z.B. 'website/internal/index.html').",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string", "description": "Der relative Pfad zur Datei"}
+                            },
+                            "required": ["file_path"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "stage_file_edit",
+                    "description": "Speichert die vorgenommenen Änderungen an einer Datei ab. WICHTIG: Du musst das komplette, aktualisierte HTML übergeben.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string", "description": "Pfad, der bearbeitet wird"},
+                                "new_html_content": {"type": "string", "description": "Das komplette aktualisierte HTML."}
+                            },
+                            "required": ["file_path", "new_html_content"]
+                        }
+                    }
+                }
             }
-        ),
-    )
-    result = json.loads(response["body"].read())
-    return result["content"][0]["text"]
+        ]
+    }
+
+    user_message = f"Nutzer-Anforderung: {user_prompt}\n{extra_context}"
+    messages = [{"role": "user", "content": [{"text": user_message}]}]
+    
+    status_placeholder = st.empty()
+    
+    # The Agent Loop
+    while True:
+        status_placeholder.info("Claude überlegt...")
+        response = bedrock.converse(
+            modelId=model_id,
+            messages=messages,
+            system=system_prompt,
+            toolConfig=tool_config
+        )
+        
+        output_message = response["output"]["message"]
+        messages.append(output_message)
+        
+        stop_reason = response["stopReason"]
+        
+        if stop_reason == "tool_use":
+            tool_results = []
+            for block in output_message.get("content", []):
+                if "toolUse" in block:
+                    tool = block["toolUse"]
+                    tool_name = tool["name"]
+                    tool_input = tool["input"]
+                    tool_id = tool["toolUseId"]
+                    
+                    if tool_name == "read_github_file":
+                        path = tool_input["file_path"]
+                        status_placeholder.info(f"Claude liest Datei: {path}...")
+                        try:
+                            content, sha = get_github_file(path)
+                            result_text = json.dumps({"content": content, "sha": sha})
+                        except Exception as e:
+                            result_text = json.dumps({"error": str(e)})
+                            
+                        tool_results.append({
+                            "toolResult": {
+                                "toolUseId": tool_id,
+                                "content": [{"text": result_text}]
+                            }
+                        })
+                        
+                    elif tool_name == "stage_file_edit":
+                        path = tool_input["file_path"]
+                        status_placeholder.info(f"Claude editiert Datei: {path}...")
+                        new_content = tool_input["new_html_content"]
+                        
+                        try:
+                            # Wir brauchen den SHA für den finalen Commit.
+                            # Wenn die Datei neu gebaut wird, versuchen wir ihn zu laden
+                            try:
+                                _, sha = get_github_file(path)
+                            except:
+                                sha = None
+                                
+                            st.session_state.staged_edits[path] = {
+                                "content": new_content,
+                                "sha": sha
+                            }
+                            result_text = json.dumps({"status": "Erfolgreich im System vorgemerkt."})
+                        except Exception as e:
+                            result_text = json.dumps({"error": str(e)})
+                            
+                        tool_results.append({
+                            "toolResult": {
+                                "toolUseId": tool_id,
+                                "content": [{"text": result_text}]
+                            }
+                        })
+                        
+            messages.append({"role": "user", "content": tool_results})
+            
+        else:
+            # End of conversation loop
+            status_placeholder.empty()
+            text_blocks = [b["text"] for b in output_message.get("content", []) if "text" in b]
+            return "\n".join(text_blocks)
 
 
 # ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
-if "generated_html" not in st.session_state:
-    st.session_state.generated_html = None
-if "html_sha" not in st.session_state:
-    st.session_state.html_sha = None
-if "target_file" not in st.session_state:
-    st.session_state.target_file = "website/internal/index.html"
+if "staged_edits" not in st.session_state:
+    st.session_state.staged_edits = {} # file_path -> {"content": html, "sha": string}
+if "agent_feedback" not in st.session_state:
+    st.session_state.agent_feedback = None
 if "last_prompt" not in st.session_state:
     st.session_state.last_prompt = ""
 if "logged_in" not in st.session_state:
@@ -193,13 +309,7 @@ if st.button("Abmelden", key="logout"):
 
 st.divider()
 
-# --- Page selector -----------------------------------------------------------
-PAGE_OPTIONS = {
-    "Interne Seite (Members-Dashboard)": "website/internal/index.html",
-    "Öffentliche Startseite": "website/public/index.html",
-}
-selected_page = st.selectbox("Zu bearbeitende Seite", list(PAGE_OPTIONS.keys()))
-file_path = PAGE_OPTIONS[selected_page]
+# --- Dropdown selector entfernt, da Claude die Dateien über Tools selbst sucht ---
 
 # --- Prompt input ------------------------------------------------------------
 st.subheader("Was soll geändert werden?")
@@ -233,15 +343,14 @@ if uploaded_file is not None:
     )
 
 # --- Generate button ---------------------------------------------------------
-if st.button("Änderungen generieren", type="primary", disabled=not prompt.strip()):
-    with st.spinner("Claude analysiert und aktualisiert die Seite..."):
+if st.button("Änderungen generieren (Agent starten)", type="primary", disabled=not prompt.strip()):
+    # Clear previous edits
+    st.session_state.staged_edits = {}
+    st.session_state.agent_feedback = None
+    
+    with st.spinner("Agent übernimmt Kontrolle..."):
         try:
-            current_html, html_sha = get_github_file(file_path)
-
-            # Build extra context from uploaded file (Fall A – Quelle)
             extra_context = ""
-            asset_committed = False
-
             if uploaded_file is not None:
                 if "Als Quelle" in (file_mode or ""):
                     if uploaded_file.type == "application/pdf":
@@ -254,14 +363,10 @@ if st.button("Änderungen generieren", type="primary", disabled=not prompt.strip
                             f"'{uploaded_file.name}':\n{pdf_text}"
                         )
                     else:
-                        st.warning(
-                            "Nur PDFs können als Inhaltsquelle extrahiert werden. "
-                            "Bild wird ignoriert."
-                        )
+                        st.warning("Nur PDFs können als Inhaltsquelle extrahiert werden.")
                     uploaded_file.seek(0)
 
                 elif "Als Asset" in (file_mode or ""):
-                    # Fall B – commit the binary file first so the link is valid
                     safe_name = uploaded_file.name.replace(" ", "_").lower()
                     asset_path = f"website/internal/pdfs/{safe_name}"
                     uploaded_file.seek(0)
@@ -271,85 +376,80 @@ if st.button("Änderungen generieren", type="primary", disabled=not prompt.strip
                         f"cms: Upload Asset '{safe_name}'",
                     )
                     extra_context = (
-                        f"\n\nEine neue Datei wurde als Asset unter "
-                        f"'pdfs/{safe_name}' abgelegt. "
-                        f"Füge bitte einen entsprechenden Download-Link im "
-                        f"Dokumente-Bereich der Seite ein."
+                        f"\n\nDie Datei wurde bereits hochgeladen unter: '{asset_path}'. "
+                        f"Du kannst nun einen Link darauf einbauen."
                     )
-                    asset_committed = True
                     st.success(f"Asset '{safe_name}' wurde hochgeladen.")
 
-            # Call Bedrock
-            new_html = call_bedrock(current_html, prompt, extra_context)
-
-            # Store in session state so the preview survives the next re-run
-            st.session_state.generated_html = new_html
-            st.session_state.html_sha = html_sha
-            st.session_state.target_file = file_path
             st.session_state.last_prompt = prompt
+            # Starte den Conversation Loop
+            feedback = call_agentic_bedrock(prompt, extra_context)
+            st.session_state.agent_feedback = feedback
 
         except Exception as exc:
-            st.error(f"Fehler beim Generieren: {exc}")
+            st.error(f"Fehler im Agent Loop: {exc}")
 
 # ---------------------------------------------------------------------------
 # Preview & Publish
 # ---------------------------------------------------------------------------
-if st.session_state.generated_html:
+if st.session_state.staged_edits or st.session_state.agent_feedback:
     st.divider()
-    st.subheader("Vorschau der generierten Seite")
-    st.info(
-        "Überprüfe die Vorschau sorgfältig, bevor du veröffentlichst. "
-        "Das Design und alle Links sollten korrekt sein."
-    )
+    
+    if st.session_state.agent_feedback:
+        st.subheader("Agent Feedback")
+        st.info(st.session_state.agent_feedback)
+        
+    if not st.session_state.staged_edits:
+        st.warning("Der Agent hat geantwortet, aber keine Datei-Änderungen vorgemerkt.")
+    else:
+        st.subheader("Bestehende Dateivormerkungen")
+        
+        # Tabs for multiple staged files
+        tabs = st.tabs(list(st.session_state.staged_edits.keys()))
+        for idx, (path, data) in enumerate(st.session_state.staged_edits.items()):
+            with tabs[idx]:
+                st.components.v1.html(data["content"], height=600, scrolling=True)
 
-    st.components.v1.html(
-        st.session_state.generated_html,
-        height=600,
-        scrolling=True,
-    )
+        col_publish, col_discard = st.columns([1, 4])
+        with col_discard:
+            if st.button("Verwerfen", key="discard"):
+                st.session_state.staged_edits = {}
+                st.session_state.agent_feedback = None
+                st.rerun()
 
-    col_publish, col_discard = st.columns([1, 4])
+        with col_publish:
+            if st.button("Sieht gut aus, veröffentlichen!", type="primary", key="publish"):
+                with st.spinner("Commits werden erstellt..."):
+                    try:
+                        for path, data in st.session_state.staged_edits.items():
+                            commit_text_file(
+                                path,
+                                data["content"],
+                                data["sha"],
+                                f"cms: {st.session_state.last_prompt[:72]}"
+                            )
+                    except Exception as exc:
+                        st.error(f"Fehler beim Veröffentlichen: {exc}")
+                        st.stop()
 
-    with col_discard:
-        if st.button("Verwerfen", key="discard"):
-            st.session_state.generated_html = None
-            st.session_state.html_sha = None
-            st.rerun()
+                st.success("Änderungen wurden in GitHub committet! Die CI/CD-Pipeline startet automatisch.")
 
-    with col_publish:
-        if st.button("Sieht gut aus, veröffentlichen!", type="primary", key="publish"):
-            with st.spinner("Commit wird erstellt..."):
-                try:
-                    commit_text_file(
-                        st.session_state.target_file,
-                        st.session_state.generated_html,
-                        st.session_state.html_sha,
-                        f"cms: {st.session_state.last_prompt[:72]}",
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                total_seconds = 120
+
+                for elapsed in range(total_seconds):
+                    fraction = (elapsed + 1) / total_seconds
+                    remaining = total_seconds - elapsed - 1
+                    progress_bar.progress(fraction)
+                    status_text.markdown(
+                        f"**Deine Änderungen werden gerade weltweit auf die Server verteilt...** "
+                        f"({remaining}s verbleibend)"
                     )
-                except Exception as exc:
-                    st.error(f"Fehler beim Veröffentlichen: {exc}")
-                    st.stop()
+                    time.sleep(1)
 
-            st.success("Änderungen wurden in GitHub committet! Die CI/CD-Pipeline startet automatisch.")
-
-            # 2-minute deployment progress bar
-            progress_bar = st.progress(0.0)
-            status_text = st.empty()
-            total_seconds = 120
-
-            for elapsed in range(total_seconds):
-                fraction = (elapsed + 1) / total_seconds
-                remaining = total_seconds - elapsed - 1
-                progress_bar.progress(fraction)
-                status_text.markdown(
-                    f"**Deine Änderungen werden gerade weltweit auf die Server verteilt...** "
-                    f"({remaining}s verbleibend)"
-                )
-                time.sleep(1)
-
-            progress_bar.progress(1.0)
-            status_text.markdown("**Deployment abgeschlossen!** Die Seite ist jetzt live.")
-
-            # Clear state
-            st.session_state.generated_html = None
-            st.session_state.html_sha = None
+                progress_bar.progress(1.0)
+                status_text.markdown("**Deployment abgeschlossen!** Die Seite ist jetzt live.")
+                
+                st.session_state.staged_edits = {}
+                st.session_state.agent_feedback = None
