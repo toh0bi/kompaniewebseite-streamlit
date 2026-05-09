@@ -59,7 +59,7 @@ if not st.session_state.logged_in:
 _GITHUB_OWNER  = st.secrets["github_owner"]
 _GITHUB_REPO   = st.secrets["github_repo"]
 _GITHUB_TOKEN  = st.secrets["github_token"]
-_GITHUB_BRANCH = st.secrets.get("github_branch", "main")
+_GITHUB_BRANCH = st.secrets.get("github_branch", "master")
 _GH_HEADERS    = {
     "Authorization": f"token {_GITHUB_TOKEN}",
     "Accept": "application/vnd.github.v3+json",
