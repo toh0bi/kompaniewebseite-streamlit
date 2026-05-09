@@ -420,7 +420,7 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
         tabs = st.tabs(list(st.session_state.staged_edits.keys()))
         for idx, (path, data) in enumerate(st.session_state.staged_edits.items()):
             with tabs[idx]:
-                st.iframe(data["content"], height=600, scrolling=True)
+                st.html(data["content"])
 
         col_publish, col_discard = st.columns([1, 4])
         with col_discard:
