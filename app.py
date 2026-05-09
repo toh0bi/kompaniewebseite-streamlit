@@ -442,10 +442,13 @@ if uploaded_file is not None:
     )
 
 # --- Generate button ---------------------------------------------------------
-if st.button("Änderungen generieren (Agent starten)", type="primary", disabled=not prompt.strip()):
-    # Clear previous edits
-    st.session_state.staged_edits = {}
-    st.session_state.agent_feedback = None
+if st.button("Änderungen generieren (Agent starten)", type="primary"):
+    if not prompt.strip():
+        st.warning("⚠️ Bitte trage zuerst oben im Textfeld einen Änderungswunsch ein!")
+    else:
+        # Clear previous edits
+        st.session_state.staged_edits = {}
+        st.session_state.agent_feedback = None
     
     try:
         extra_context = ""
