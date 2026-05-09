@@ -97,6 +97,8 @@ def commit_text_file(path: str, content: str, sha: str | None, message: str) -> 
     if not resp.ok:
         print(f"[API ERROR] Status: {resp.status_code}")
         print(f"[API ERROR] Body: {resp.text}")
+        # Wir werfen unsere eigene Exception, damit die Fehlermeldung direkt im Streamlit UI angezeigt wird
+        raise Exception(f"GitHub API Error {resp.status_code} für {path}: {resp.text} \n(URL: {url}, Branch: {_GITHUB_BRANCH}, SHA: {sha})")
     resp.raise_for_status()
 
 
