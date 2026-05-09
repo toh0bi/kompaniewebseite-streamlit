@@ -80,14 +80,16 @@ def get_github_file(path: str) -> tuple[str, str]:
     return content, data["sha"]
 
 
-def commit_text_file(path: str, content: str, sha: str, message: str) -> None:
-    """Update an existing text file via the GitHub Contents API."""
+def commit_text_file(path: str, content: str, sha: str | None, message: str) -> None:
+    """Update or create a text file via the GitHub Contents API."""
     payload = {
         "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
-        "sha": sha,
         "branch": _GITHUB_BRANCH,
     }
+    if sha:
+        payload["sha"] = sha
+
     resp = requests.put(_gh_url(path), headers=_GH_HEADERS, json=payload, timeout=15)
     resp.raise_for_status()
 
