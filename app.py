@@ -207,83 +207,96 @@ def call_agentic_bedrock(user_prompt: str, extra_context: str = "") -> str:
     user_message = f"Nutzer-Anforderung: {user_prompt}\n{extra_context}"
     messages = [{"role": "user", "content": [{"text": user_message}]}]
     
-    status_placeholder = st.empty()
+    print(f"\n[AGENT START] Neues Agenten-Ziel: {user_prompt[:50]}...")
     
-    # The Agent Loop
-    while True:
-        status_placeholder.info("Claude überlegt...")
-        response = bedrock.converse(
-            modelId=model_id,
-            messages=messages,
-            system=system_prompt,
-            toolConfig=tool_config
-        )
+    # ---------------------------------------------------------------------
+    # The Agent Loop with visible UI Status
+    # ---------------------------------------------------------------------
+    with st.status("🤖 Agent übernimmt Kontrolle...", expanded=True) as status:
+        status.write("Initialisiere Bedrock-Verbindung...")
         
-        output_message = response["output"]["message"]
-        messages.append(output_message)
-        
-        stop_reason = response["stopReason"]
-        
-        if stop_reason == "tool_use":
-            tool_results = []
-            for block in output_message.get("content", []):
-                if "toolUse" in block:
-                    tool = block["toolUse"]
-                    tool_name = tool["name"]
-                    tool_input = tool["input"]
-                    tool_id = tool["toolUseId"]
-                    
-                    if tool_name == "read_github_file":
-                        path = tool_input["file_path"]
-                        status_placeholder.info(f"Claude liest Datei: {path}...")
-                        try:
-                            content, sha = get_github_file(path)
-                            result_text = json.dumps({"content": content, "sha": sha})
-                        except Exception as e:
-                            result_text = json.dumps({"error": str(e)})
-                            
-                        tool_results.append({
-                            "toolResult": {
-                                "toolUseId": tool_id,
-                                "content": [{"text": result_text}]
-                            }
-                        })
-                        
-                    elif tool_name == "stage_file_edit":
-                        path = tool_input["file_path"]
-                        status_placeholder.info(f"Claude editiert Datei: {path}...")
-                        new_content = tool_input["new_html_content"]
-                        
-                        try:
-                            # Wir brauchen den SHA für den finalen Commit.
-                            # Wenn die Datei neu gebaut wird, versuchen wir ihn zu laden
-                            try:
-                                _, sha = get_github_file(path)
-                            except:
-                                sha = None
-                                
-                            st.session_state.staged_edits[path] = {
-                                "content": new_content,
-                                "sha": sha
-                            }
-                            result_text = json.dumps({"status": "Erfolgreich im System vorgemerkt."})
-                        except Exception as e:
-                            result_text = json.dumps({"error": str(e)})
-                            
-                        tool_results.append({
-                            "toolResult": {
-                                "toolUseId": tool_id,
-                                "content": [{"text": result_text}]
-                            }
-                        })
-                        
-            messages.append({"role": "user", "content": tool_results})
+        loop_counter = 1
+        while True:
+            status.write(f"🔄 **Iteration {loop_counter}:** Claude überlegt (Dies kann bei großen Änderungen 1-2 Minuten dauern)...")
+            print(f"[AGENT LOOP {loop_counter}] Warte auf Antwort von Bedrock...")
             
-        else:
-            # End of conversation loop
-            status_placeholder.empty()
-            text_blocks = [b["text"] for b in output_message.get("content", []) if "text" in b]
-            return "\n".join(text_blocks)
+            start_time = time.time()
+            response = bedrock.converse(
+                modelId=model_id,
+                messages=messages,
+                system=system_prompt,
+                toolConfig=tool_config
+            )
+            duration = time.time() - start_time
+            
+            output_message = response["output"]["message"]
+            messages.append(output_message)
+            
+            stop_reason = response["stopReason"]
+            print(f"[AGENT LOOP {loop_counter}] Antwort erhalten nach {duration:.1f}s. Stop reason: {stop_reason}")
+            
+            if stop_reason == "tool_use":
+                tool_results = []
+                for block in output_message.get("content", []):
+                    if "toolUse" in block:
+                        tool = block["toolUse"]
+                        tool_name = tool["name"]
+                        tool_input = tool["input"]
+                        tool_id = tool["toolUseId"]
+                        
+                        print(f"  -> [TOOL] {tool_name} aufgerufen mit Args: {str(tool_input)[:100]}")
+                        
+                        if tool_name == "read_github_file":
+                            path = tool_input["file_path"]
+                            status.write(f"📖 Claude liest sich in die Datei ein: `{path}`")
+                            try:
+                                content, sha = get_github_file(path)
+                                result_text = json.dumps({"content": content, "sha": sha})
+                            except Exception as e:
+                                result_text = json.dumps({"error": str(e)})
+                                
+                            tool_results.append({
+                                "toolResult": {
+                                    "toolUseId": tool_id,
+                                    "content": [{"text": result_text}]
+                                }
+                            })
+                            
+                        elif tool_name == "stage_file_edit":
+                            path = tool_input["file_path"]
+                            status.write(f"✍️ **Claude hat HTML-Code für `{path}` generiert und vorgemerkt!**")
+                            new_content = tool_input["new_html_content"]
+                            
+                            try:
+                                try:
+                                    _, sha = get_github_file(path)
+                                except:
+                                    sha = None
+                                    
+                                st.session_state.staged_edits[path] = {
+                                    "content": new_content,
+                                    "sha": sha
+                                }
+                                result_text = json.dumps({"status": "Erfolgreich im System vorgemerkt."})
+                            except Exception as e:
+                                result_text = json.dumps({"error": str(e)})
+                                
+                            tool_results.append({
+                                "toolResult": {
+                                    "toolUseId": tool_id,
+                                    "content": [{"text": result_text}]
+                                }
+                            })
+                            
+                messages.append({"role": "user", "content": tool_results})
+                loop_counter += 1
+                
+            else:
+                # End of conversation loop
+                status.update(label="✅ Agent hat seine Arbeit beendet!", state="complete", expanded=False)
+                print("[AGENT ENDE] Agent ist fertig.")
+                text_blocks = [b["text"] for b in output_message.get("content", []) if "text" in b]
+                return "\n".join(text_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -348,46 +361,45 @@ if st.button("Änderungen generieren (Agent starten)", type="primary", disabled=
     st.session_state.staged_edits = {}
     st.session_state.agent_feedback = None
     
-    with st.spinner("Agent übernimmt Kontrolle..."):
-        try:
-            extra_context = ""
-            if uploaded_file is not None:
-                if "Als Quelle" in (file_mode or ""):
-                    if uploaded_file.type == "application/pdf":
-                        reader = PdfReader(io.BytesIO(uploaded_file.read()))
-                        pdf_text = "\n".join(
-                            page.extract_text() or "" for page in reader.pages
-                        )
-                        extra_context = (
-                            f"\n\nInhalte aus der hochgeladenen PDF "
-                            f"'{uploaded_file.name}':\n{pdf_text}"
-                        )
-                    else:
-                        st.warning("Nur PDFs können als Inhaltsquelle extrahiert werden.")
-                    uploaded_file.seek(0)
-
-                elif "Als Asset" in (file_mode or ""):
-                    safe_name = uploaded_file.name.replace(" ", "_").lower()
-                    asset_path = f"website/internal/pdfs/{safe_name}"
-                    uploaded_file.seek(0)
-                    commit_binary_file(
-                        asset_path,
-                        uploaded_file.read(),
-                        f"cms: Upload Asset '{safe_name}'",
+    try:
+        extra_context = ""
+        if uploaded_file is not None:
+            if "Als Quelle" in (file_mode or ""):
+                if uploaded_file.type == "application/pdf":
+                    reader = PdfReader(io.BytesIO(uploaded_file.read()))
+                    pdf_text = "\n".join(
+                        page.extract_text() or "" for page in reader.pages
                     )
                     extra_context = (
-                        f"\n\nDie Datei wurde bereits hochgeladen unter: '{asset_path}'. "
-                        f"Du kannst nun einen Link darauf einbauen."
+                        f"\n\nInhalte aus der hochgeladenen PDF "
+                        f"'{uploaded_file.name}':\n{pdf_text}"
                     )
-                    st.success(f"Asset '{safe_name}' wurde hochgeladen.")
+                else:
+                    st.warning("Nur PDFs können als Inhaltsquelle extrahiert werden.")
+                uploaded_file.seek(0)
 
-            st.session_state.last_prompt = prompt
-            # Starte den Conversation Loop
-            feedback = call_agentic_bedrock(prompt, extra_context)
-            st.session_state.agent_feedback = feedback
+            elif "Als Asset" in (file_mode or ""):
+                safe_name = uploaded_file.name.replace(" ", "_").lower()
+                asset_path = f"website/internal/pdfs/{safe_name}"
+                uploaded_file.seek(0)
+                commit_binary_file(
+                    asset_path,
+                    uploaded_file.read(),
+                    f"cms: Upload Asset '{safe_name}'",
+                )
+                extra_context = (
+                    f"\n\nDie Datei wurde bereits hochgeladen unter: '{asset_path}'. "
+                    f"Du kannst nun einen Link darauf einbauen."
+                )
+                st.success(f"Asset '{safe_name}' wurde hochgeladen.")
 
-        except Exception as exc:
-            st.error(f"Fehler im Agent Loop: {exc}")
+        st.session_state.last_prompt = prompt
+        # Starte den Conversation Loop
+        feedback = call_agentic_bedrock(prompt, extra_context)
+        st.session_state.agent_feedback = feedback
+
+    except Exception as exc:
+        st.error(f"Fehler im Agent Loop: {exc}")
 
 # ---------------------------------------------------------------------------
 # Preview & Publish
@@ -408,7 +420,7 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
         tabs = st.tabs(list(st.session_state.staged_edits.keys()))
         for idx, (path, data) in enumerate(st.session_state.staged_edits.items()):
             with tabs[idx]:
-                st.components.v1.html(data["content"], height=600, scrolling=True)
+                st.iframe(data["content"], height=600, scrolling=True)
 
         col_publish, col_discard = st.columns([1, 4])
         with col_discard:
