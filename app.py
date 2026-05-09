@@ -59,7 +59,8 @@ if not st.session_state.logged_in:
 _GITHUB_OWNER  = st.secrets["github_owner"]
 _GITHUB_REPO   = st.secrets["github_repo"]
 _GITHUB_TOKEN  = st.secrets["github_token"]
-_GITHUB_BRANCH = st.secrets.get("github_branch", "master")
+# Force master branch ignoring any accidently set secrets
+_GITHUB_BRANCH = "master"
 _GH_HEADERS    = {
     "Authorization": f"token {_GITHUB_TOKEN}",
     "Accept": "application/vnd.github.v3+json",
@@ -80,8 +81,8 @@ def get_github_file(path: str) -> tuple[str, str]:
     return content, data["sha"]
 
 
-def commit_text_file(path: str, content: str, sha: str | None, message: str) -> None:
-    """Update or create a text file via the GitHub Contents API."""
+def commit_text_file(path: str, content: str, sha: str | None, message: str) -> str:
+    """Update or create a text file via the GitHub Contents API. Returns to commit SHA."""
     url = _gh_url(path)
     print(f"\n[API REQ] method=PUT url={url}")
     print(f"[API REQ] path={path}, sha={sha}, branch={_GITHUB_BRANCH}")
@@ -100,6 +101,81 @@ def commit_text_file(path: str, content: str, sha: str | None, message: str) -> 
         # Wir werfen unsere eigene Exception, damit die Fehlermeldung direkt im Streamlit UI angezeigt wird
         raise Exception(f"GitHub API Error {resp.status_code} für {path}: {resp.text} \n(URL: {url}, Branch: {_GITHUB_BRANCH}, SHA: {sha})")
     resp.raise_for_status()
+    # Ensure to return the new commit sha which we can poll for later
+    return resp.json()["commit"]["sha"]
+
+
+def get_failed_job_log(run_id: int) -> str:
+    """Fetch the log tail for a failed GitHub action job to show to the agent/user."""
+    jobs_url = f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs/{run_id}/jobs"
+    resp = requests.get(jobs_url, headers=_GH_HEADERS, timeout=15)
+    if not resp.ok:
+        return "Konnte Error-Logs nicht laden (fehlende Berechtigungen?)."
+        
+    jobs = resp.json().get("jobs", [])
+    failed_job = next((j for j in jobs if j.get("conclusion") == "failure"), None)
+    if not failed_job:
+        return "Pipeline fehlgeschlagen, aber kein fehlerhafter Job gefunden."
+        
+    html_url = failed_job.get("html_url", "")
+    job_id = failed_job["id"]
+    
+    # Try downloading logs (this redirects to a text file download)
+    try:
+        log_resp = requests.get(f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/jobs/{job_id}/logs", headers=_GH_HEADERS, timeout=15)
+        if log_resp.ok:
+            log_text = log_resp.text
+            # extract bottom ~30 lines to catch the error
+            lines = log_text.splitlines()[-30:]
+            error_snippet = "\n".join(lines)
+            return f"**Fehler im Quality Gate (Job '{failed_job['name']}'):**\n```\n{error_snippet}\n```\n\n[Hier klicken für komplette GitHub Logs]({html_url})"
+    except Exception:
+        pass
+        
+    return f"Pipeline fehlgeschlagen. [Hier die Logs auf GitHub ansehen]({html_url})"
+
+
+def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
+    """Polls GitHub Actions API for the workflow run attached to the commit."""
+    run_id = None
+    
+    # Warten, bis der Workflow-Lauf von GitHub registriert ist (max. 10 Sekunden)
+    status_text.markdown("⏳ **Suche nach gestarteter CI/CD Pipeline...**")
+    for _ in range(5):
+        resp = requests.get(
+            f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs?head_sha={commit_sha}",
+            headers=_GH_HEADERS, timeout=15
+        )
+        if resp.ok and resp.json().get("total_count", 0) > 0:
+            run = resp.json()["workflow_runs"][0]
+            run_id = run["id"]
+            break
+        time.sleep(2)
+        
+    if not run_id:
+        return False, "Konnte den GitHub Actions Lauf nicht finden. Er wurde möglicherweise nicht gestartet."
+        
+    # Polling des Lauf-Status
+    while True:
+        resp = requests.get(
+            f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs/{run_id}",
+            headers=_GH_HEADERS, timeout=15
+        )
+        if not resp.ok:
+            return False, "Fehler beim Abrufen des Pipeline-Status."
+            
+        run = resp.json()
+        status = run["status"]
+        conclusion = run["conclusion"]
+        
+        if status == "completed":
+            if conclusion == "success":
+                return True, ""
+            else:
+                return False, get_failed_job_log(run_id)
+        else:
+            status_text.markdown(f"🔄 **Pipeline läuft noch...** (Status: `{status}` / URL: [GitHub Actions]({run['html_url']}))")
+            time.sleep(5)
 
 
 def commit_binary_file(path: str, raw_bytes: bytes, message: str) -> None:
@@ -442,6 +518,7 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
         with col_publish:
             if st.button("Sieht gut aus, veröffentlichen!", type="primary", key="publish"):
                 with st.spinner("Commits werden erstellt..."):
+                    last_commit_sha = None
                     print("\n[PUBLISH ACTION] Starte Veröffentlichungsprozess")
                     print(f"[PUBLISH OVERVIEW] Anzahl vorbereiteter Dateien: {len(st.session_state.staged_edits)}")
                     for p, d in st.session_state.staged_edits.items():
@@ -450,7 +527,7 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
                     try:
                         for path, data in st.session_state.staged_edits.items():
                             print(f"[PUBLISH ITERATION] Rufe commit_text_file auf für: {path}")
-                            commit_text_file(
+                            last_commit_sha = commit_text_file(
                                 path,
                                 data["content"],
                                 data["sha"],
@@ -462,22 +539,18 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
 
                 st.success("Änderungen wurden in GitHub committet! Die CI/CD-Pipeline startet automatisch.")
 
-                progress_bar = st.progress(0.0)
-                status_text = st.empty()
-                total_seconds = 120
-
-                for elapsed in range(total_seconds):
-                    fraction = (elapsed + 1) / total_seconds
-                    remaining = total_seconds - elapsed - 1
-                    progress_bar.progress(fraction)
-                    status_text.markdown(
-                        f"**Deine Änderungen werden gerade weltweit auf die Server verteilt...** "
-                        f"({remaining}s verbleibend)"
-                    )
-                    time.sleep(1)
-
-                progress_bar.progress(1.0)
-                status_text.markdown("**Deployment abgeschlossen!** Die Seite ist jetzt live.")
-                
-                st.session_state.staged_edits = {}
-                st.session_state.agent_feedback = None
+                if last_commit_sha:
+                    status_text = st.empty()
+                    success, error_msg = poll_github_action(last_commit_sha, status_text)
+                    
+                    if success:
+                        status_text.markdown("✅ **Deployment abgeschlossen!** Alle Quality Gates passiert, die Seite ist jetzt live.")
+                        st.session_state.staged_edits = {}
+                        st.session_state.agent_feedback = None
+                    else:
+                        status_text.markdown("❌ **Deployment fehlgeschlagen!**")
+                        st.error(error_msg)
+                        st.info("Kopiere die Fehlermeldung und gib sie dem Agenten, damit er das HTML reparieren kann!")
+                else:
+                    st.session_state.staged_edits = {}
+                    st.session_state.agent_feedback = None
