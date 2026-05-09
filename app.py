@@ -82,6 +82,9 @@ def get_github_file(path: str) -> tuple[str, str]:
 
 def commit_text_file(path: str, content: str, sha: str | None, message: str) -> None:
     """Update or create a text file via the GitHub Contents API."""
+    url = _gh_url(path)
+    print(f"\n[API REQ] method=PUT url={url}")
+    print(f"[API REQ] path={path}, sha={sha}, branch={_GITHUB_BRANCH}")
     payload = {
         "message": message,
         "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
@@ -90,7 +93,10 @@ def commit_text_file(path: str, content: str, sha: str | None, message: str) -> 
     if sha:
         payload["sha"] = sha
 
-    resp = requests.put(_gh_url(path), headers=_GH_HEADERS, json=payload, timeout=15)
+    resp = requests.put(url, headers=_GH_HEADERS, json=payload, timeout=15)
+    if not resp.ok:
+        print(f"[API ERROR] Status: {resp.status_code}")
+        print(f"[API ERROR] Body: {resp.text}")
     resp.raise_for_status()
 
 
@@ -434,8 +440,14 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
         with col_publish:
             if st.button("Sieht gut aus, veröffentlichen!", type="primary", key="publish"):
                 with st.spinner("Commits werden erstellt..."):
+                    print("\n[PUBLISH ACTION] Starte Veröffentlichungsprozess")
+                    print(f"[PUBLISH OVERVIEW] Anzahl vorbereiteter Dateien: {len(st.session_state.staged_edits)}")
+                    for p, d in st.session_state.staged_edits.items():
+                        print(f"  -> {p}: Content={'JA' if d['content'] else 'NEIN'} | SHA={d['sha']}")
+                        
                     try:
                         for path, data in st.session_state.staged_edits.items():
+                            print(f"[PUBLISH ITERATION] Rufe commit_text_file auf für: {path}")
                             commit_text_file(
                                 path,
                                 data["content"],
