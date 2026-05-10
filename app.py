@@ -9,12 +9,22 @@ import base64
 import io
 import json
 import time
+import logging
+import sys
 
 import boto3
 from botocore.config import Config
 import requests
 import streamlit as st
 from pypdf import PdfReader
+
+# Logger konfigurieren, damit wir in der Streamlit Cloud alles sicher sehen
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("cms_agent")
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -146,20 +156,21 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
             f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs?branch={_GITHUB_BRANCH}&event=push",
             headers=_GH_HEADERS, timeout=15
         )
-        print(f"[POLL ATTEMPT {attempt}] Suche nach push-pipelines für Commit: {commit_sha}")
-        if resp.ok and resp.json().get("total_count", 0) > 0:
+        
+        logger.info(f"[POLL ATTEMPT {attempt}] Suche nach push-pipelines für Commit: {commit_sha}")
+        
+        if not resp.ok:
+            logger.error(f"[POLL ERROR] GitHub API HTTP {resp.status_code}: {resp.text}")
+        elif resp.json().get("total_count", 0) > 0:
             runs = resp.json()["workflow_runs"]
             
-            # Wir checken lieber die letzten 5 Pipelines als nur die allererste,
-            # da gerade bei parallelen Action-Triggern oder irre schnell beendeten Workflows
-            # die Position 0 schwanken kann.
             found_latest = False
             for r in runs[:5]:
-                print(f"  -> Run {r['id']} | Status: {r['status']} | SHA: {r.get('head_sha')}")
-                # Entweder der SHA-Commit matcht, oder wir klinken uns in die gerade laufende Queue ein.
+                logger.info(f"  -> Run {r['id']} | Status: {r['status']} | SHA: {r.get('head_sha')} | URL: {r.get('html_url')}")
+                
                 if r.get("head_sha") == commit_sha or (not found_latest and r.get("status") in ["queued", "in_progress", "pending", "requested"]):
                     run_id = r["id"]
-                    print(f"[POLL SUCCESS] Match für Pipeline gefunden: {run_id}")
+                    logger.info(f"[POLL SUCCESS] Match für Pipeline gefunden: {run_id}")
                     break
                 found_latest = True
                     
@@ -252,7 +263,13 @@ def load_system_prompt() -> str:
 def call_agentic_bedrock(user_prompt: str, extra_context: str = "") -> str:
     """Agentic loop using the Bedrock Converse API with Function Calling."""
     bedrock = _bedrock_client()
+    
     model_id = st.secrets.get("BEDROCK_MODEL_ID", "eu.anthropic.claude-haiku-4-5-20251001-v1:0")
+    
+    # AWS Cross-Region Profile Fix: Wenn Cross-Region genutzt wird, muss das Prefix 'eu.' 
+    # oder 'us.' vor der Model ID stehen. Wenn es im Secret vergessen wurde, hängen wir es an.
+    if model_id.startswith("anthropic."):
+        model_id = "eu." + model_id
 
     system_prompt = [{"text": load_system_prompt()}]
     
@@ -575,21 +592,23 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
             if st.button("Sieht gut aus, veröffentlichen!", type="primary", key="publish"):
                 with st.spinner("Commits werden erstellt..."):
                     last_commit_sha = None
-                    print("\n[PUBLISH ACTION] Starte Veröffentlichungsprozess")
-                    print(f"[PUBLISH OVERVIEW] Anzahl vorbereiteter Dateien: {len(st.session_state.staged_edits)}")
+                    logger.info("\n[PUBLISH ACTION] Starte Veröffentlichungsprozess")
+                    logger.info(f"[PUBLISH OVERVIEW] Anzahl vorbereiteter Dateien: {len(st.session_state.staged_edits)}")
                     for p, d in st.session_state.staged_edits.items():
-                        print(f"  -> {p}: Content={'JA' if d['content'] else 'NEIN'} | SHA={d['sha']}")
+                        logger.info(f"  -> {p}: Content={'JA' if d['content'] else 'NEIN'} | SHA={d['sha']}")
                         
                     try:
                         for path, data in st.session_state.staged_edits.items():
-                            print(f"[PUBLISH ITERATION] Rufe commit_text_file auf für: {path}")
+                            logger.info(f"[PUBLISH ITERATION] Rufe commit_text_file auf für: {path}")
                             last_commit_sha = commit_text_file(
                                 path,
                                 data["content"],
                                 data["sha"],
                                 f"cms: {st.session_state.last_prompt[:72]}"
                             )
+                            logger.info(f"[PUBLISH SUCCESS] Neuer Commit SHA: {last_commit_sha}")
                     except Exception as exc:
+                        logger.error(f"[PUBLISH ERROR] {exc}")
                         st.error(f"Fehler beim Veröffentlichen: {exc}")
                         st.stop()
 
