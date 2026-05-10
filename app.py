@@ -139,9 +139,9 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
     """Polls GitHub Actions API for the workflow run attached to the commit."""
     run_id = None
     
-    # Warten, bis der Workflow-Lauf von GitHub registriert ist (max. 10 Sekunden)
-    status_text.markdown("⏳ **Suche nach gestarteter CI/CD Pipeline...**")
-    for _ in range(5):
+    # Warten, bis der Workflow-Lauf von GitHub registriert ist (max. 45 Sekunden)
+    status_text.markdown("⏳ **Suche nach gestarteter CI/CD Pipeline...** (Dies kann einen Moment dauern)")
+    for _ in range(15):
         resp = requests.get(
             f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs?head_sha={commit_sha}",
             headers=_GH_HEADERS, timeout=15
@@ -150,7 +150,7 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
             run = resp.json()["workflow_runs"][0]
             run_id = run["id"]
             break
-        time.sleep(2)
+        time.sleep(3)
         
     if not run_id:
         return False, "Konnte den GitHub Actions Lauf nicht finden. Er wurde möglicherweise nicht gestartet."
@@ -509,7 +509,7 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
         tabs = st.tabs(list(st.session_state.staged_edits.keys()))
         for idx, (path, data) in enumerate(st.session_state.staged_edits.items()):
             with tabs[idx]:
-                st.html(data["content"])
+                st.components.v1.html(data["content"], height=800, scrolling=True)
 
         col_publish, col_discard = st.columns([1, 4])
         with col_discard:
