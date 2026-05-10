@@ -157,23 +157,30 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
             headers=_GH_HEADERS, timeout=15
         )
         
-        logger.info(f"[POLL ATTEMPT {attempt}] Suche nach push-pipelines für Commit: {commit_sha}")
+        logger.info(f"[POLL ATTEMPT {attempt}] Suche nach push-pipelines (Ziel-Commit: {commit_sha})")
         
         if not resp.ok:
             logger.error(f"[POLL ERROR] GitHub API HTTP {resp.status_code}: {resp.text}")
         elif resp.json().get("total_count", 0) > 0:
             runs = resp.json()["workflow_runs"]
             
-            found_latest = False
             for r in runs[:5]:
-                logger.info(f"  -> Run {r['id']} | Status: {r['status']} | SHA: {r.get('head_sha')} | URL: {r.get('html_url')}")
+                r_sha = r.get('head_sha')
+                logger.info(f"  -> Gefunden: Run {r['id']} | Status: {r['status']} | SHA: {r_sha}")
                 
-                if r.get("head_sha") == commit_sha or (not found_latest and r.get("status") in ["queued", "in_progress", "pending", "requested"]):
+                # Exakter Match
+                if r_sha == commit_sha:
                     run_id = r["id"]
-                    logger.info(f"[POLL SUCCESS] Match für Pipeline gefunden: {run_id}")
+                    logger.info(f"[POLL SUCCESS] Exakter Match für Commit {commit_sha} in Run {run_id}")
                     break
-                found_latest = True
-                    
+            
+            # Falls kein exakter Match, nimm den neuesten, WENN er in progress/queued ist.
+            if not run_id:
+                latest = runs[0]
+                if latest.get("status") in ["queued", "in_progress", "pending", "requested"]:
+                    run_id = latest["id"]
+                    logger.info(f"[POLL FALLBACK] Kein exakter Match. Klinke in aktive Pipeline {run_id} ein.")
+        
         if run_id:
             break
         time.sleep(3)
