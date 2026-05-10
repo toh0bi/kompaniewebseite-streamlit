@@ -139,17 +139,24 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
     """Polls GitHub Actions API for the workflow run attached to the commit."""
     run_id = None
     
-    # Warten, bis der Workflow-Lauf von GitHub registriert ist (max. 45 Sekunden)
     status_text.markdown("⏳ **Suche nach gestarteter CI/CD Pipeline...** (Dies kann einen Moment dauern)")
     for _ in range(15):
+        # Wir filtern direkt nach aktuellen push events im Branch
         resp = requests.get(
-            f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs?head_sha={commit_sha}",
+            f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs?branch={_GITHUB_BRANCH}&event=push",
             headers=_GH_HEADERS, timeout=15
         )
         if resp.ok and resp.json().get("total_count", 0) > 0:
-            run = resp.json()["workflow_runs"][0]
-            run_id = run["id"]
-            break
+            runs = resp.json()["workflow_runs"]
+            latest_run = runs[0]
+            
+            # Bei mehreren API-Pushes direkt hintereinander startet GitHub die Pipeline oft nicht
+            # für den allerletzten Commit (unseren commit_sha), sondern wirft die Commits zusammen
+            # in eine Pipeline. Wir nehmen den neuesten Lauf, wenn er entweder exakt unserem SHA
+            # entspricht ODER wenn er generell gerade jetzt läuft!
+            if latest_run.get("head_sha") == commit_sha or latest_run.get("status") in ["queued", "in_progress", "pending", "requested"]:
+                run_id = latest_run["id"]
+                break
         time.sleep(3)
         
     if not run_id:
