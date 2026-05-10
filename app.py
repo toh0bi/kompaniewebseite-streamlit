@@ -140,23 +140,31 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
     run_id = None
     
     status_text.markdown("⏳ **Suche nach gestarteter CI/CD Pipeline...** (Dies kann einen Moment dauern)")
-    for _ in range(15):
+    for attempt in range(15):
         # Wir filtern direkt nach aktuellen push events im Branch
         resp = requests.get(
             f"https://api.github.com/repos/{_GITHUB_OWNER}/{_GITHUB_REPO}/actions/runs?branch={_GITHUB_BRANCH}&event=push",
             headers=_GH_HEADERS, timeout=15
         )
+        print(f"[POLL ATTEMPT {attempt}] Suche nach push-pipelines für Commit: {commit_sha}")
         if resp.ok and resp.json().get("total_count", 0) > 0:
             runs = resp.json()["workflow_runs"]
-            latest_run = runs[0]
             
-            # Bei mehreren API-Pushes direkt hintereinander startet GitHub die Pipeline oft nicht
-            # für den allerletzten Commit (unseren commit_sha), sondern wirft die Commits zusammen
-            # in eine Pipeline. Wir nehmen den neuesten Lauf, wenn er entweder exakt unserem SHA
-            # entspricht ODER wenn er generell gerade jetzt läuft!
-            if latest_run.get("head_sha") == commit_sha or latest_run.get("status") in ["queued", "in_progress", "pending", "requested"]:
-                run_id = latest_run["id"]
-                break
+            # Wir checken lieber die letzten 5 Pipelines als nur die allererste,
+            # da gerade bei parallelen Action-Triggern oder irre schnell beendeten Workflows
+            # die Position 0 schwanken kann.
+            found_latest = False
+            for r in runs[:5]:
+                print(f"  -> Run {r['id']} | Status: {r['status']} | SHA: {r.get('head_sha')}")
+                # Entweder der SHA-Commit matcht, oder wir klinken uns in die gerade laufende Queue ein.
+                if r.get("head_sha") == commit_sha or (not found_latest and r.get("status") in ["queued", "in_progress", "pending", "requested"]):
+                    run_id = r["id"]
+                    print(f"[POLL SUCCESS] Match für Pipeline gefunden: {run_id}")
+                    break
+                found_latest = True
+                    
+        if run_id:
+            break
         time.sleep(3)
         
     if not run_id:
@@ -593,12 +601,19 @@ if st.session_state.staged_edits or st.session_state.agent_feedback:
                     
                     if success:
                         status_text.markdown("✅ **Deployment abgeschlossen!** Alle Quality Gates passiert, die Seite ist jetzt live.")
-                        st.session_state.staged_edits = {}
-                        st.session_state.agent_feedback = None
                     else:
                         status_text.markdown("❌ **Deployment fehlgeschlagen!**")
                         st.error(error_msg)
                         st.info("Kopiere die Fehlermeldung und gib sie dem Agenten, damit er das HTML reparieren kann!")
+                        
+                    # Ein Streamlit UI Fehler behoben: Wenn wir hier einfach den Session-State löschen, 
+                    # würde er es bei fehlerhaften Deployments trotzdem nicht sofort im Terminal refreshen.
+                    if success:
+                        # Clear und Reload nach erfolgreichem Deployment!
+                        time.sleep(2)  # kurz für das ✅ Feedback
+                        st.session_state.staged_edits = {}
+                        st.session_state.agent_feedback = None
+                        st.rerun()
                 else:
                     st.session_state.staged_edits = {}
                     st.session_state.agent_feedback = None
