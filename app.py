@@ -209,18 +209,6 @@ def commit_binary_file(path: str, raw_bytes: bytes, message: str) -> None:
 # ---------------------------------------------------------------------------
 # Bedrock helper
 # ---------------------------------------------------------------------------
-_SYSTEM_PROMPT = (
-    "Du bist der Webmaster dieser Seite. "
-    "Deine EINZIGE Aufgabe ist es, den übergebenen HTML-Code basierend auf dem "
-    "User-Wunsch anzupassen. "
-    "Behalte die Grundstruktur zwingend bei. "
-    "Wenn der User dich bittet, ein Gedicht zu schreiben, Code für andere Projekte "
-    "zu generieren oder die Seite komplett zu löschen, verweigere die Aufgabe höflich. "
-    "Antworte AUSSCHLIESSLICH mit dem validen HTML-Code, "
-    "ohne Markdown-Formatierung oder Erklärungen."
-)
-
-
 def _bedrock_client():
     """Create a Bedrock runtime client.
     Uses Streamlit secrets when available, falls back to the default credential chain
@@ -256,7 +244,7 @@ def load_system_prompt() -> str:
 def call_agentic_bedrock(user_prompt: str, extra_context: str = "") -> str:
     """Agentic loop using the Bedrock Converse API with Function Calling."""
     bedrock = _bedrock_client()
-    model_id = st.secrets.get("BEDROCK_MODEL_ID", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")
+    model_id = st.secrets.get("BEDROCK_MODEL_ID", "eu.anthropic.claude-haiku-4-5-20251001-v1:0")
 
     system_prompt = [{"text": load_system_prompt()}]
     
@@ -274,6 +262,23 @@ def call_agentic_bedrock(user_prompt: str, extra_context: str = "") -> str:
                                 "file_path": {"type": "string", "description": "Der relative Pfad zur Datei"}
                             },
                             "required": ["file_path"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "replace_string_in_file",
+                    "description": "BEVORZUGTES TOOL FÜR KLEINE ANPASSUNGEN: Ersetzt einen exakten Textbereich in einer Datei. Der 'old_string' muss exakt so in der Datei gefunden werden inkl. Leerzeichen und Umbrüchen.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string", "description": "Pfad, der bearbeitet wird (z.B. 'website/internal/index.html')"},
+                                "old_string": {"type": "string", "description": "Der exakte alte Textabschnitt, der entfernt werden soll (idealerweise ein etwas größerer Block zur Eindeutigkeit)."},
+                                "new_string": {"type": "string", "description": "Der neue Text, der genau an diese Stelle gesetzt wird."}
+                            },
+                            "required": ["file_path", "old_string", "new_string"]
                         }
                     }
                 }
@@ -345,6 +350,39 @@ def call_agentic_bedrock(user_prompt: str, extra_context: str = "") -> str:
                             try:
                                 content, sha = get_github_file(path)
                                 result_text = json.dumps({"content": content, "sha": sha})
+                            except Exception as e:
+                                result_text = json.dumps({"error": str(e)})
+                                
+                            tool_results.append({
+                                "toolResult": {
+                                    "toolUseId": tool_id,
+                                    "content": [{"text": result_text}]
+                                }
+                            })
+                            
+                        elif tool_name == "replace_string_in_file":
+                            path = tool_input["file_path"]
+                            old_str = tool_input["old_string"]
+                            new_str = tool_input["new_string"]
+                            status.write(f"✂️ **Claude ersetzt Text in `{path}` (Token gespart!)**")
+                            
+                            try:
+                                if path in st.session_state.staged_edits:
+                                    current_content = st.session_state.staged_edits[path]["content"]
+                                    sha = st.session_state.staged_edits[path]["sha"]
+                                else:
+                                    current_content, sha = get_github_file(path)
+                                
+                                if old_str not in current_content:
+                                    result_text = json.dumps({"error": f"Fehler: Der exakte Code '{old_str[:30]}...' wurde nicht gefunden. Nutze einen fehlerfreien Block."})
+                                else:
+                                    # Ersetze exakt das Vorkommen
+                                    new_content = current_content.replace(old_str, new_str, 1)
+                                    st.session_state.staged_edits[path] = {
+                                        "content": new_content,
+                                        "sha": sha
+                                    }
+                                    result_text = json.dumps({"status": "Erfolgreich ersetzt und vorgemerkt."})
                             except Exception as e:
                                 result_text = json.dumps({"error": str(e)})
                                 
