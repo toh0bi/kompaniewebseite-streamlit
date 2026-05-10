@@ -161,6 +161,8 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
         
         if not resp.ok:
             logger.error(f"[POLL ERROR] GitHub API HTTP {resp.status_code}: {resp.text}")
+            if resp.status_code == 403:
+                return False, "Fehlende Berechtigung: Dein GitHub Token in den Streamlit Secrets benötigt zusätzlich den Scope `actions` (oder `workflow`), um die Pipeline abzufragen. Das HTML wurde aber erfolgreich gespeichert!"
         elif resp.json().get("total_count", 0) > 0:
             runs = resp.json()["workflow_runs"]
             
@@ -213,12 +215,13 @@ def poll_github_action(commit_sha: str, status_text) -> tuple[bool, str]:
 
 def commit_binary_file(path: str, raw_bytes: bytes, message: str) -> None:
     """Create or update a binary file (PDF, image) via the GitHub Contents API."""
-    # Check if the file already exists (need its SHA for updates)
     existing_sha: str | None = None
-    try:
-        _, existing_sha = get_github_file(path)
-    except requests.HTTPError:
-        pass  # File does not exist yet – that's fine
+    
+    # Wir rufen direkt die GitHub API ab, anstatt get_github_file() zu nutzen,
+    # da get_github_file() Binärdateien mit decode("utf-8") zu lesen versucht -> Crash!
+    check_resp = requests.get(_gh_url(path), headers=_GH_HEADERS, timeout=15)
+    if check_resp.ok:
+        existing_sha = check_resp.json().get("sha")
 
     payload: dict = {
         "message": message,
